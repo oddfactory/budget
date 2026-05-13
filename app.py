@@ -438,9 +438,16 @@ if uploaded_file is not None:
             
             if api_key:
                 st.subheader("🤖 AI 전략 분석 리포트")
-                with st.spinner('Gemini AI가 전략적 근거를 분석하고 있습니다...'):
-                    ai_report = generate_ai_insights(api_key, allocation_df)
-                    st.markdown(ai_report)
+                
+                if 'ai_report' not in st.session_state:
+                    st.session_state.ai_report = None
+                    
+                if st.button("✨ AI 분석 리포트 생성 (클릭)"):
+                    with st.spinner('Gemini AI가 데이터를 기반으로 전략적 근거를 작성 중입니다... (약 10~20초 소요)'):
+                        st.session_state.ai_report = generate_ai_insights(api_key, allocation_df)
+                
+                if st.session_state.ai_report:
+                    st.markdown(st.session_state.ai_report)
             else:
                 st.info("💡 사이드바에 Gemini API Key를 입력하시면, 매체 최적화 및 운영 가이드에 대한 상세한 AI 분석 리포트를 확인하실 수 있습니다.")
 else:
