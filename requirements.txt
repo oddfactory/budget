@@ -4,3 +4,5 @@ plotly
 google-generativeai
 numpy
 matplotlib
+scikit-learn
+scipy
