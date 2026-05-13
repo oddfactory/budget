@@ -229,23 +229,40 @@ def calculate_optimal_budget(df, total_budget, opt_method, opt_target):
                 
             pred_X_base = pd.DataFrame(combo_base_features)
             
-            def objective(spends):
-                pred_X = pred_X_base.copy()
-                pred_X['Spend'] = spends
-                pred_X = pred_X[feature_cols]
-                preds = best_model.predict(pred_X)
-                return -np.sum(preds)
+            # 기준 금액(예: 100만원) 투입 시 기대되는 성과(클릭/전환)를 ML로 예측하여 이를 Score로 활용
+            standard_spend = 1000000
+            pred_X = pred_X_base.copy()
+            pred_X['Spend'] = standard_spend
+            pred_X = pred_X[feature_cols]
+            
+            predicted_efficiency = best_model.predict(pred_X)
+            
+            # 예측값을 바탕으로 비례 배분 스코어 생성 (최소값 보정)
+            main_combos['Score'] = np.maximum(predicted_efficiency, 0.01)
+            
+            # 40% Cap을 적용한 비례 배분 로직
+            cap_ratio = 0.40
+            max_budget_per_combo = remaining_budget * cap_ratio
+            
+            main_combos['Temp_Alloc'] = remaining_budget * (main_combos['Score'] / main_combos['Score'].sum())
+            
+            allocated = False
+            while not allocated:
+                over_cap_mask = main_combos['Temp_Alloc'] > max_budget_per_combo
+                if not over_cap_mask.any() or len(main_combos) == 1:
+                    allocated = True
+                    break
+                    
+                excess_budget = main_combos.loc[over_cap_mask, 'Temp_Alloc'].sum() - (over_cap_mask.sum() * max_budget_per_combo)
+                main_combos.loc[over_cap_mask, 'Temp_Alloc'] = max_budget_per_combo
                 
-            n_combos = len(main_combos)
-            init_guess = np.full(n_combos, remaining_budget / n_combos)
-            max_b = remaining_budget * 0.40
-            bounds = [(0, max_b) for _ in range(n_combos)]
-            constraints = {'type': 'eq', 'fun': lambda spends: np.sum(spends) - remaining_budget}
-            
-            res = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-            
-            main_combos['Temp_Alloc'] = res.x
-            main_combos['Score'] = 1.0 # ML mode doesn't use the same score
+                under_cap_mask = ~over_cap_mask
+                if under_cap_mask.sum() > 0:
+                    under_cap_score_sum = main_combos.loc[under_cap_mask, 'Score'].sum()
+                    main_combos.loc[under_cap_mask, 'Temp_Alloc'] += excess_budget * (main_combos.loc[under_cap_mask, 'Score'] / under_cap_score_sum)
+                else:
+                    allocated = True
+                    
             main_combos['Proposed Budget'] = main_combos['Temp_Alloc']
             main_combos['Category'] = 'Main Budget (ML Optimized)'
             
