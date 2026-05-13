@@ -64,7 +64,7 @@ with st.sidebar:
     opt_target = st.radio("최우선 목표 (ML 전용)", ["전환수 극대화", "클릭수 극대화 (최저 CPC)"])
     
     # 3. Gemini API Key
-    api_key = st.text_input("Gemini API Key", type="password")
+    api_key = st.text_input("Gemini API Key", type="password").strip()
     
     st.markdown("---")
     st.markdown("### 데이터 스펙 안내")
