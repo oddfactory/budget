@@ -6,6 +6,9 @@ import google.generativeai as genai
 from datetime import timedelta
 import numpy as np
 import io
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from scipy.optimize import minimize
 
 # Set page config
 st.set_page_config(page_title="AI Budget Optimizer", page_icon="💰", layout="wide")
@@ -55,6 +58,10 @@ with st.sidebar:
     
     # 2. Total Budget Input
     total_budget = st.number_input("차월 총 예산 설정 (원)", min_value=100000, max_value=10000000000, value=10000000, step=100000)
+    
+    st.markdown("### ⚙️ 최적화 설정")
+    opt_method = st.radio("알고리즘 선택", ["머신러닝 예측 모델 (ML)", "휴리스틱 룰 기반 (Rule)"])
+    opt_target = st.radio("최우선 목표 (ML 전용)", ["전환수 극대화", "클릭수 극대화 (최저 CPC)"])
     
     # 3. Gemini API Key
     api_key = st.text_input("Gemini API Key", type="password")
@@ -112,7 +119,7 @@ def preprocess_data(df):
         st.error(f"데이터 전처리 중 오류가 발생했습니다: {e}")
         return None
 
-def calculate_optimal_budget(df, total_budget):
+def calculate_optimal_budget(df, total_budget, opt_method, opt_target):
     # 1. Calculate weights based on date
     max_date = df['Date'].max()
     three_months_ago = max_date - pd.Timedelta(days=90)
@@ -126,7 +133,7 @@ def calculate_optimal_budget(df, total_budget):
     
     # 3. Aggregate by Platform and Ad Type
     agg_df = df.groupby(['Platform', 'Ad Type']).agg({
-        'Spend': 'sum', # Actual total spend
+        'Spend': 'sum',
         'W_Spend': 'sum',
         'W_Clicks': 'sum',
         'W_Conversions': 'sum'
@@ -140,10 +147,9 @@ def calculate_optimal_budget(df, total_budget):
     agg_df['Combination'] = agg_df['Platform'] + " - " + agg_df['Ad Type']
     
     # 4. Identify combinations with 0 spend (Test Combinations)
-    # If all have spend > 0, we can't allocate test budget based on this. We'll just assume items with < 1% of total past spend as 'test'.
     total_past_spend = agg_df['Spend'].sum()
     if total_past_spend > 0:
-        agg_df['Is_Test'] = agg_df['Spend'] < (total_past_spend * 0.005) # less than 0.5% is considered no/low history
+        agg_df['Is_Test'] = agg_df['Spend'] < (total_past_spend * 0.005)
     else:
         agg_df['Is_Test'] = True
         
@@ -169,88 +175,165 @@ def calculate_optimal_budget(df, total_budget):
     remaining_budget = total_budget - test_budget_total
     
     if len(main_combos) == 0:
-        # All are test combos
         result_df = pd.DataFrame(test_allocation)
-        return result_df, agg_df
+        return result_df, agg_df, None
         
-    # 5. Scoring Model for Main Combinations
-    # Normalize (Min-Max)
-    def min_max_scale(series, reverse=False):
-        s_min = series.min()
-        s_max = series.max()
-        if s_max == s_min:
-            return pd.Series([0.5] * len(series), index=series.index)
-        scaled = (series - s_min) / (s_max - s_min)
-        if reverse:
-            return 1 - scaled
-        return scaled
+    ml_info = None
+    
+    if opt_method == "머신러닝 예측 모델 (ML)":
+        ml_df = df[df['Spend'] > 0].copy()
+        target_col = 'Conversions' if opt_target == '전환수 극대화' else 'Clicks'
         
-    main_combos['Norm_Clicks'] = min_max_scale(main_combos['W_Clicks'])
-    main_combos['Norm_Conversions'] = min_max_scale(main_combos['W_Conversions'])
-    
-    # For CPC and CPA, lower is better. Also filter out 0 values if they mean 'no data' to avoid skewing.
-    # Actually, 0 CPA usually means no conversions, which is bad. 
-    # Let's replace 0 with max value for CPC and CPA before scaling so they get the lowest score.
-    max_cpc = main_combos[main_combos['W_CPC'] > 0]['W_CPC'].max()
-    max_cpa = main_combos[main_combos['W_CPA'] > 0]['W_CPA'].max()
-    
-    main_combos['W_CPC_adj'] = main_combos['W_CPC'].replace(0, max_cpc if pd.notna(max_cpc) else 0)
-    main_combos['W_CPA_adj'] = main_combos['W_CPA'].replace(0, max_cpa if pd.notna(max_cpa) else 0)
-    
-    main_combos['Norm_CPC'] = min_max_scale(main_combos['W_CPC_adj'], reverse=True)
-    main_combos['Norm_CPA'] = min_max_scale(main_combos['W_CPA_adj'], reverse=True)
-    
-    # Calculate integrated score
-    main_combos['Score'] = (main_combos['Norm_Clicks'] + main_combos['Norm_Conversions'] + main_combos['Norm_CPC'] + main_combos['Norm_CPA']) / 4
-    
-    # Ensure scores are > 0 to allocate budget
-    main_combos['Score'] = main_combos['Score'].clip(lower=0.01)
-    
-    # 6. Allocate Budget with 40% Cap
-    cap_ratio = 0.40
-    max_budget_per_combo = remaining_budget * cap_ratio
-    
-    main_combos['Temp_Alloc'] = remaining_budget * (main_combos['Score'] / main_combos['Score'].sum())
-    
-    # Apply Cap repeatedly until no combo exceeds cap
-    allocated = False
-    while not allocated:
-        over_cap_mask = main_combos['Temp_Alloc'] > max_budget_per_combo
-        if not over_cap_mask.any() or len(main_combos) == 1:
-            allocated = True
-            break
-            
-        # Cap those over and redistribute the rest
-        excess_budget = main_combos.loc[over_cap_mask, 'Temp_Alloc'].sum() - (over_cap_mask.sum() * max_budget_per_combo)
-        main_combos.loc[over_cap_mask, 'Temp_Alloc'] = max_budget_per_combo
+        X = ml_df[['Spend', 'Platform', 'Ad Type']]
+        y = ml_df[target_col]
         
-        under_cap_mask = ~over_cap_mask
-        if under_cap_mask.sum() > 0:
-            under_cap_score_sum = main_combos.loc[under_cap_mask, 'Score'].sum()
-            main_combos.loc[under_cap_mask, 'Temp_Alloc'] += excess_budget * (main_combos.loc[under_cap_mask, 'Score'] / under_cap_score_sum)
+        X_encoded = pd.get_dummies(X, columns=['Platform', 'Ad Type'])
+        feature_cols = X_encoded.columns
+        
+        models = {
+            'Linear Regression': LinearRegression(),
+            'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42),
+            'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, random_state=42)
+        }
+        
+        best_score = -float('inf')
+        best_model_name = None
+        best_model = None
+        
+        for name, m in models.items():
+            try:
+                m.fit(X_encoded, y)
+                score = m.score(X_encoded, y)
+                if score > best_score:
+                    best_score = score
+                    best_model_name = name
+                    best_model = m
+            except:
+                pass
+                
+        if best_model is None:
+            opt_method = "휴리스틱 룰 기반 (Rule)"
         else:
-            allocated = True # Edge case: all over cap, which shouldn't happen if len > 1 / cap_ratio
-
-    main_combos['Proposed Budget'] = main_combos['Temp_Alloc']
-    main_combos['Category'] = 'Main Budget (Based on Perf)'
-    
-    # 7. Combine results
+            feature_importances = None
+            if hasattr(best_model, 'feature_importances_'):
+                feature_importances = dict(zip(feature_cols, best_model.feature_importances_))
+                
+            combo_base_features = []
+            for _, row in main_combos.iterrows():
+                base_feat = {c: 0 for c in feature_cols}
+                plat_col = f"Platform_{row['Platform']}"
+                ad_col = f"Ad Type_{row['Ad Type']}"
+                if plat_col in base_feat: base_feat[plat_col] = 1
+                if ad_col in base_feat: base_feat[ad_col] = 1
+                combo_base_features.append(base_feat)
+                
+            pred_X_base = pd.DataFrame(combo_base_features)
+            
+            def objective(spends):
+                pred_X = pred_X_base.copy()
+                pred_X['Spend'] = spends
+                pred_X = pred_X[feature_cols]
+                preds = best_model.predict(pred_X)
+                return -np.sum(preds)
+                
+            n_combos = len(main_combos)
+            init_guess = np.full(n_combos, remaining_budget / n_combos)
+            max_b = remaining_budget * 0.40
+            bounds = [(0, max_b) for _ in range(n_combos)]
+            constraints = {'type': 'eq', 'fun': lambda spends: np.sum(spends) - remaining_budget}
+            
+            res = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+            
+            main_combos['Temp_Alloc'] = res.x
+            main_combos['Score'] = 1.0 # ML mode doesn't use the same score
+            main_combos['Proposed Budget'] = main_combos['Temp_Alloc']
+            main_combos['Category'] = 'Main Budget (ML Optimized)'
+            
+            ml_info = {
+                'best_model': best_model_name,
+                'r2_score': best_score,
+                'feature_importances': feature_importances,
+                'target': target_col
+            }
+            
+    if opt_method == "휴리스틱 룰 기반 (Rule)":
+        def min_max_scale(series, reverse=False):
+            s_min = series.min()
+            s_max = series.max()
+            if s_max == s_min:
+                return pd.Series([0.5] * len(series), index=series.index)
+            scaled = (series - s_min) / (s_max - s_min)
+            if reverse:
+                return 1 - scaled
+            return scaled
+            
+        main_combos['Norm_Clicks'] = min_max_scale(main_combos['W_Clicks'])
+        main_combos['Norm_Conversions'] = min_max_scale(main_combos['W_Conversions'])
+        
+        max_cpc = main_combos[main_combos['W_CPC'] > 0]['W_CPC'].max()
+        max_cpa = main_combos[main_combos['W_CPA'] > 0]['W_CPA'].max()
+        
+        main_combos['W_CPC_adj'] = main_combos['W_CPC'].replace(0, max_cpc if pd.notna(max_cpc) else 0)
+        main_combos['W_CPA_adj'] = main_combos['W_CPA'].replace(0, max_cpa if pd.notna(max_cpa) else 0)
+        
+        main_combos['Norm_CPC'] = min_max_scale(main_combos['W_CPC_adj'], reverse=True)
+        main_combos['Norm_CPA'] = min_max_scale(main_combos['W_CPA_adj'], reverse=True)
+        
+        main_combos['Score'] = (main_combos['Norm_Clicks'] + main_combos['Norm_Conversions'] + main_combos['Norm_CPC'] + main_combos['Norm_CPA']) / 4
+        main_combos['Score'] = main_combos['Score'].clip(lower=0.01)
+        
+        cap_ratio = 0.40
+        max_budget_per_combo = remaining_budget * cap_ratio
+        
+        main_combos['Temp_Alloc'] = remaining_budget * (main_combos['Score'] / main_combos['Score'].sum())
+        
+        allocated = False
+        while not allocated:
+            over_cap_mask = main_combos['Temp_Alloc'] > max_budget_per_combo
+            if not over_cap_mask.any() or len(main_combos) == 1:
+                allocated = True
+                break
+                
+            excess_budget = main_combos.loc[over_cap_mask, 'Temp_Alloc'].sum() - (over_cap_mask.sum() * max_budget_per_combo)
+            main_combos.loc[over_cap_mask, 'Temp_Alloc'] = max_budget_per_combo
+            
+            under_cap_mask = ~over_cap_mask
+            if under_cap_mask.sum() > 0:
+                under_cap_score_sum = main_combos.loc[under_cap_mask, 'Score'].sum()
+                main_combos.loc[under_cap_mask, 'Temp_Alloc'] += excess_budget * (main_combos.loc[under_cap_mask, 'Score'] / under_cap_score_sum)
+            else:
+                allocated = True
+                
+        main_combos['Proposed Budget'] = main_combos['Temp_Alloc']
+        main_combos['Category'] = 'Main Budget (Based on Perf)'
+        
     main_allocation = main_combos[['Combination', 'Platform', 'Ad Type', 'Score', 'Proposed Budget', 'Category']].to_dict('records')
     
     final_allocation = pd.DataFrame(main_allocation + test_allocation)
     final_allocation = final_allocation.sort_values(by='Proposed Budget', ascending=False).reset_index(drop=True)
     
-    return final_allocation, agg_df
+    return final_allocation, agg_df, ml_info
 
-def generate_ai_insights(api_key, allocation_df):
+def generate_ai_insights(api_key, allocation_df, ml_info=None):
     genai.configure(api_key=api_key)
     
     # Convert dataframe to JSON string for prompt
     data_str = allocation_df[['Combination', 'Score', 'Proposed Budget', 'Category']].to_json(orient='records', force_ascii=False)
     
+    ml_context = ""
+    if ml_info:
+        ml_context = f"""
+        [머신러닝 분석 결과]
+        - 최적화 목표: {ml_info['target']} 극대화
+        - 선정된 최우수 예측 모델: {ml_info['best_model']} (결정계수 R2: {ml_info['r2_score']:.2f})
+        이 예산은 수학적 최적화(Scipy SLSQP)를 통해 머신러닝이 예측한 {ml_info['target']}를 극대화하도록 계산되었습니다.
+        """
+        
     prompt = f"""
     당신은 15년차 시니어 미디어 플래너이자 데이터 사이언티스트입니다.
-    아래는 과거 데이터를 기반으로 최적화 알고리즘(성과 4개 지표 정규화, 최근 3개월 가중치, 최대 40% Cap, 5% 테스트 예산 적용)을 통해 산출된 매체/광고유형별 차월 예산 분배 제안 결과(JSON)입니다.
+    아래는 과거 데이터를 기반으로 최적화 알고리즘(최대 40% Cap, 5% 테스트 예산 적용)을 통해 산출된 매체/광고유형별 차월 예산 분배 제안 결과(JSON)입니다.
+    
+    {ml_context}
 
     결과 데이터:
     {data_str}
@@ -310,7 +393,7 @@ if uploaded_file is not None:
         
     if df is not None:
         # Calculate optimal budget
-        allocation_df, agg_df = calculate_optimal_budget(df, total_budget)
+        allocation_df, agg_df, ml_info = calculate_optimal_budget(df, total_budget, opt_method, opt_target)
         
         # Calculate number of unique months in data to compute monthly average spend
         num_months = max(1, df['Date'].dt.to_period('M').nunique())
@@ -357,6 +440,17 @@ if uploaded_file is not None:
 
         with tab2:
             st.subheader("최적화된 예산 배분 결과")
+            
+            if ml_info:
+                st.success(f"🤖 **{ml_info['best_model']}** 모델이 **{ml_info['target']} 극대화**를 목표로 예산을 최적화했습니다. (예측 신뢰도 $R^2$: {ml_info['r2_score']:.2f})")
+                if ml_info['feature_importances']:
+                    with st.expander("📊 모델 변수 중요도 (Feature Importance) 보기"):
+                        fi_df = pd.DataFrame(list(ml_info['feature_importances'].items()), columns=['Feature', 'Importance']).sort_values('Importance', ascending=True)
+                        # clean up feature names
+                        fi_df['Feature'] = fi_df['Feature'].str.replace('Platform_', '매체: ').str.replace('Ad Type_', '유형: ')
+                        fig_fi = px.bar(fi_df, x='Importance', y='Feature', orientation='h', title='어떤 요인이 가장 중요했을까요?')
+                        fig_fi.update_layout(template="plotly_dark")
+                        st.plotly_chart(fig_fi, use_container_width=True)
             
             # KPI Cards
             c1, c2, c3 = st.columns(3)
@@ -444,7 +538,7 @@ if uploaded_file is not None:
                     
                 if st.button("✨ AI 분석 리포트 생성 (클릭)"):
                     with st.spinner('Gemini AI가 데이터를 기반으로 전략적 근거를 작성 중입니다... (약 10~20초 소요)'):
-                        st.session_state.ai_report = generate_ai_insights(api_key, allocation_df)
+                        st.session_state.ai_report = generate_ai_insights(api_key, allocation_df, ml_info)
                 
                 if st.session_state.ai_report:
                     st.markdown(st.session_state.ai_report)
