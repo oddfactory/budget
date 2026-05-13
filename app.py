@@ -244,7 +244,6 @@ def calculate_optimal_budget(df, total_budget):
 
 def generate_ai_insights(api_key, allocation_df):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     # Convert dataframe to JSON string for prompt
     data_str = allocation_df[['Combination', 'Score', 'Proposed Budget', 'Category']].to_json(orient='records', force_ascii=False)
@@ -264,10 +263,18 @@ def generate_ai_insights(api_key, allocation_df):
     """
     
     try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"AI 분석 중 오류가 발생했습니다: {e}"
+        if "404" in str(e):
+            try:
+                model_fallback = genai.GenerativeModel('gemini-pro')
+                response_fallback = model_fallback.generate_content(prompt)
+                return response_fallback.text + "\n\n*(💡 참고: 사용하신 API 키 환경에서 1.5 모델 접근이 제한되어 있어, 가장 안정적인 범용 모델인 `gemini-pro`를 통해 분석 결과를 도출했습니다.)*"
+            except Exception as e2:
+                return f"AI 분석 중 오류가 발생했습니다 (대체 모델 접근도 실패했습니다): {e2}"
+        return f"AI 분석 중 알 수 없는 오류가 발생했습니다: {e}"
 
 if uploaded_file is not None:
     # Read data
