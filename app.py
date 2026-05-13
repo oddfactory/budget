@@ -244,7 +244,7 @@ def calculate_optimal_budget(df, total_budget):
 
 def generate_ai_insights(api_key, allocation_df):
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     # Convert dataframe to JSON string for prompt
     data_str = allocation_df[['Combination', 'Score', 'Proposed Budget', 'Category']].to_json(orient='records', force_ascii=False)
