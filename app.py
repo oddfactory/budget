@@ -263,17 +263,22 @@ def generate_ai_insights(api_key, allocation_df):
     """
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
         if "404" in str(e):
             try:
-                model_fallback = genai.GenerativeModel('gemini-pro')
+                model_fallback = genai.GenerativeModel('gemini-1.5-flash')
                 response_fallback = model_fallback.generate_content(prompt)
-                return response_fallback.text + "\n\n*(💡 참고: 사용하신 API 키 환경에서 1.5 모델 접근이 제한되어 있어, 가장 안정적인 범용 모델인 `gemini-pro`를 통해 분석 결과를 도출했습니다.)*"
-            except Exception as e2:
-                return f"AI 분석 중 오류가 발생했습니다 (대체 모델 접근도 실패했습니다): {e2}"
+                return response_fallback.text + "\n\n*(💡 참고: 2.5 모델 접근 제한으로 인해 `gemini-1.5-flash` 모델을 통해 분석 결과를 도출했습니다.)*"
+            except Exception:
+                try:
+                    model_fallback = genai.GenerativeModel('gemini-pro')
+                    response_fallback = model_fallback.generate_content(prompt)
+                    return response_fallback.text + "\n\n*(💡 참고: 사용하신 API 키 환경에서 Flash 모델 접근이 제한되어 있어, 가장 안정적인 범용 모델인 `gemini-pro`를 통해 분석 결과를 도출했습니다.)*"
+                except Exception as e2:
+                    return f"AI 분석 중 오류가 발생했습니다 (대체 모델 접근도 실패했습니다): {e2}"
         return f"AI 분석 중 알 수 없는 오류가 발생했습니다: {e}"
 
 if uploaded_file is not None:
