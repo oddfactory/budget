@@ -53,18 +53,22 @@ st.markdown("과거 광고 성과 데이터를 분석하여 매체 및 광고유
 with st.sidebar:
     st.header("설정 및 입력")
     
-    # 1. File Upload
-    uploaded_file = st.file_uploader("광고 리포트 업로드 (TSV, CSV, TXT)", type=['tsv', 'txt', 'csv'])
-    
-    # 2. Total Budget Input
-    total_budget = st.number_input("차월 총 예산 설정 (원)", min_value=100000, max_value=10000000000, value=10000000, step=100000)
-    
-    st.markdown("### ⚙️ 최적화 설정")
-    opt_method = st.radio("알고리즘 선택", ["머신러닝 예측 모델 (ML)", "휴리스틱 룰 기반 (Rule)"])
-    opt_target = st.radio("최우선 목표 (ML 전용)", ["전환수 극대화", "클릭수 극대화 (최저 CPC)"])
-    
-    # 3. Gemini API Key
-    api_key = st.text_input("Gemini API Key", type="password").strip()
+    with st.form("settings_form"):
+        # 1. File Upload
+        uploaded_file = st.file_uploader("광고 리포트 업로드 (TSV, CSV, TXT)", type=['tsv', 'txt', 'csv'])
+        
+        # 2. Total Budget Input
+        total_budget = st.number_input("차월 총 예산 설정 (원)", min_value=100000, max_value=10000000000, value=10000000, step=100000)
+        
+        st.markdown("### ⚙️ 최적화 설정")
+        opt_method = st.radio("알고리즘 선택", ["머신러닝 예측 모델 (ML)", "휴리스틱 룰 기반 (Rule)"])
+        opt_target = st.radio("최우선 목표 (ML 전용)", ["전환수 극대화", "클릭수 극대화 (최저 CPC)"])
+        
+        # 3. Gemini API Key
+        api_key = st.text_input("Gemini API Key", type="password").strip()
+        
+        # Action Button
+        run_analysis = st.form_submit_button("🚀 최적화 분석 실행", use_container_width=True)
     
     st.markdown("---")
     st.markdown("### 데이터 스펙 안내")
@@ -367,7 +371,11 @@ def generate_ai_insights(api_key, allocation_df, ml_info=None):
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        if "404" in str(e):
+        error_msg = str(e)
+        if "API_KEY_INVALID" in error_msg or "API key not valid" in error_msg:
+            return "❌ **API 키 오류:** 입력하신 Gemini API Key가 유효하지 않습니다. 올바른 키를 입력했는지 확인해 주세요."
+        
+        if "404" in error_msg:
             try:
                 model_fallback = genai.GenerativeModel('gemini-1.5-flash')
                 response_fallback = model_fallback.generate_content(prompt)
