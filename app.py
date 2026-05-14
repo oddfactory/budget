@@ -432,6 +432,18 @@ if uploaded_file is not None:
         # Tabs
         tab1, tab2 = st.tabs(["📊 과거 성과 분석", "💡 최적화 제안 및 시뮬레이션"])
         
+        if run_analysis:
+            import streamlit.components.v1 as components
+            js = '''
+            <script>
+                const tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+                if (tabs.length > 1) {
+                    tabs[1].click();
+                }
+            </script>
+            '''
+            components.html(js, height=0, width=0)
+        
         with tab1:
             st.subheader("매체 및 광고유형별 누적 성과")
             st.dataframe(
